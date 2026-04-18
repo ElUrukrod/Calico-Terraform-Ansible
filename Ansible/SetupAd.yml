@@ -1,0 +1,27 @@
+- name: Installation du Contrôleur de Domaine
+  hosts: all
+  vars:
+    # Cette variable est remplie par Terraform
+    # ad_safe_mode_password: "..." 
+    domain_name: "calico.priv"
+
+  tasks:
+    - name: Installer les services AD DS
+      ansible.windows.win_feature:
+        name: AD-Domain-Services
+        state: present
+        include_management_tools: yes
+
+    - name: Promouvoir le serveur en Contrôleur de Domaine
+      microsoft.ad.domain:
+        dns_domain_name: "{{ domain_name }}"
+        safe_mode_password: "{{ ad_safe_mode_password }}"
+        # Optionnel: On peut forcer le nom NetBIOS
+        domain_netbios_name: "CALICO"
+      register: ad_install
+
+    - name: Redémarrage après installation
+      ansible.windows.win_reboot:
+        msg: "Promotion AD terminée, redémarrage en cours..."
+        reboot_timeout: 600
+      when: ad_install.changed
