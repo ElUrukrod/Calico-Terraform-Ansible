@@ -2,6 +2,23 @@ data "vsphere_datacenter" "datacenter" {
   name = "Datacenter"
 }
 
+data "phpipam_subnet" "subnet_search" {
+  subnet_address = "10.0.0.0"
+  subnet_mask    = 24
+}
+
+data "phpipam_first_free_address" "next_ip" {
+  subnet_id = data.phpipam_subnet.target_subnet.id
+}
+
+data "phpipam_subnet" "target_subnet" {
+  subnet_id = data.phpipam_subnet.subnet_search.subnet_id
+}
+
+locals {
+  gw_ip = data.phpipam_subnet.target_subnet.gateway.ip_addr
+}
+
 data "vsphere_compute_cluster" "host" {
   name          = "Calico"
   datacenter_id = data.vsphere_datacenter.datacenter.id
@@ -113,7 +130,7 @@ resource "vsphere_virtual_machine" "win_server" {
 
     customize {
       windows_options {
-        computer_name  = "SRV01"
+        computer_name  = "SRV001"
         # On utilise le mot de passe généré par Terraform
         admin_password = random_password.win_admin_password.result
         
@@ -122,44 +139,60 @@ resource "vsphere_virtual_machine" "win_server" {
         auto_logon_count = 1
 
 
-        run_once_command_list = [
-          # 1. On passe le réseau en "Private" pour ouvrir le pare-feu
-          "powershell.exe -ExecutionPolicy Bypass -Command \"Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private\"",
-          
-          # 2. Installation et démarrage SSH + Règles de pare-feu
-          "powershell.exe -ExecutionPolicy Bypass -Command \"Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0\"",
-          "powershell.exe -ExecutionPolicy Bypass -Command \"Start-Service sshd; Set-Service -Name sshd -StartupType 'Automatic'\"",
-          "powershell.exe -ExecutionPolicy Bypass -Command \"New-NetFirewallRule -Name 'AllowSSH_Any' -DisplayName 'Allow SSH Any Profile' -Enabled True -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 22\"", # <--- LA VIRGULE ÉTAIT MANQUANTE ICI
-          
-          # 3. Injection de la clé et droits
-          "powershell.exe -ExecutionPolicy Bypass -Command \"$path = 'C:\\ProgramData\\ssh'; if (!(Test-Path $path)) { New-Item -ItemType Directory -Path $path -Force }; '${local.ansible_public_key}' | Out-File -FilePath \"$path\\administrators_authorized_keys\" -Encoding ascii; icacls \"$path\\administrators_authorized_keys\" /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F'\""
+run_once_command_list = [
+        # 1. Passage du réseau en "Private"
+        "powershell.exe -ExecutionPolicy Bypass -Command \"Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private\"",
+        
+        # 2. Injection de la clé SSH et droits
+        "powershell.exe -ExecutionPolicy Bypass -Command \"$path = 'C:\\ProgramData\\ssh'; if (!(Test-Path $path)) { New-Item -ItemType Directory -Path $path -Force }; '${local.ansible_public_key}' | Out-File -FilePath \"$path\\administrators_authorized_keys\" -Encoding ascii; icacls \"$path\\administrators_authorized_keys\" /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F'\"",
+      
+        # 3. Configuration OpenSSH (Server + Firewall + Service)
+        "powershell.exe -ExecutionPolicy Bypass -Command \"Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0\"",
+        "powershell.exe -ExecutionPolicy Bypass -Command \"Start-Service sshd; Set-Service -Name sshd -StartupType 'Automatic'\"",
+        "powershell.exe -ExecutionPolicy Bypass -Command \"New-NetFirewallRule -Name 'AllowSSH_Any' -DisplayName 'Allow SSH Any Profile' -Enabled True -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 22\"",
+        
+        # 4. ACTIVATION DU BUREAU À DISTANCE (RDP)
+        # Activation dans le registre (fDenyTSConnections = 0)
+        "powershell.exe -ExecutionPolicy Bypass -Command \"Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server' -Name 'fDenyTSConnections' -Value 0\"",
+        # Activation du NLA (Network Level Authentication)
+        "powershell.exe -ExecutionPolicy Bypass -Command \"Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp' -Name 'UserAuthentication' -Value 1\"",
+        # Ouverture du pare-feu pour le RDP (Port 3389)
+        "powershell.exe -ExecutionPolicy Bypass -Command \"Enable-NetFirewallRule -DisplayGroup '@FirewallAPI.dll,-28752'\"", # Groupe standard RDP
+        "powershell.exe -ExecutionPolicy Bypass -Command \"New-NetFirewallRule -Name 'AllowRDP_Any' -DisplayName 'Allow RDP Any Profile' -Enabled True -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389\""
+
         ]
       }
 
       network_interface {
-        ipv4_address = "10.0.0.150"
-        ipv4_netmask = 24
+        ipv4_address = data.phpipam_first_free_address.next_ip.ip_address
+        ipv4_netmask = data.phpipam_subnet.target_subnet.subnet_mask
         
       }
-      ipv4_gateway = "10.0.0.254"
+      # On accède à l'adresse IP à l'intérieur de l'objet gateway
+      ipv4_gateway = local.gw_ip
     }
   }
 provisioner "local-exec" {
     command = <<EOT
-      # Attente SSH
-      until nc -z -v -w5 10.0.0.150 22; do sleep 10; done
+      # On utilise l'IP dynamique ici aussi
+      until nc -z -v -w5 ${data.phpipam_first_free_address.next_ip.ip_address} 22; do sleep 10; done
       
-      # Lancement Ansible avec passage du mot de passe DSRM en extra-var
-      ansible-playbook -i 10.0.0.150, \
+      ansible-playbook -i ${data.phpipam_first_free_address.next_ip.ip_address}, \
         --user Administrateur \
-        -e "ansible_connection=ssh" \
-        -e "ansible_shell_type=powershell" \
         -e "ad_safe_mode_password=${nonsensitive(random_password.ad_dsrm_password.result)}" \
-        ../Ansible/SetupAd.yml
+        ../Ansible/Deploy_AD.yml
     EOT
     
     environment = {
       ANSIBLE_HOST_KEY_CHECKING = "False"
     }
   }
+}
+
+resource "phpipam_address" "reserve_ip" {
+  subnet_id   = data.phpipam_subnet.target_subnet.id
+  ip_address  = data.phpipam_first_free_address.next_ip.ip_address
+  hostname    = vsphere_virtual_machine.win_server.name
+  description = "VM provisionnée par Terraform"
+  state_tag_id = 2 # 2 = Active / Used
 }
