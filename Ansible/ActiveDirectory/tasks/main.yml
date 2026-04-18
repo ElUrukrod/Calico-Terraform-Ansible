@@ -1,0 +1,9 @@
+---
+- name: "Installation et Promotion du Domaine"
+  ansible.builtin.include_tasks: deploy_ad.yml
+
+- name: "Gestion des Unités d'Organisation (OU)"
+  ansible.builtin.include_tasks: ous.yml
+
+- name: "Gestion des Utilisateurs"
+  ansible.builtin.include_tasks: users.yml

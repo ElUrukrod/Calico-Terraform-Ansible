@@ -1,0 +1,38 @@
+---
+- name: Charger le CSV des utilisateurs avec titres forcés
+  set_fact:
+    data_users_raw: >-
+      {{ 
+        lookup('ansible.builtin.file', csv_users, encoding='iso-8859-1') 
+        | community.general.from_csv(
+          delimiter=';',
+          fieldnames=['prenom', 'nom', 'OU', 'id', 'mail', 'nom_prenom', 'pwd', 'note']
+        ) 
+      }}
+
+- name: Créer les utilisateurs
+  microsoft.ad.user:
+    name: "{{ item.nom_prenom }}"
+    firstname: "{{ item.prenom }}"
+    surname: "{{ item.nom }}"
+    sam_account_name: "{{ item.id }}"
+    # --- ON CHANGE LES NOMS ICI ---
+    upn: "{{ item.mail }}"       # Au lieu de user_principal_name
+    email: "{{ item.mail }}"     # Au lieu de mail (si tu veux remplir le champ mail)
+    # ------------------------------
+    password: "{{ item.pwd }}"
+    path: >-
+      {% set found_ou = data_ous.list | selectattr('OU4', 'equalto', item.OU) | first 
+         if data_ous.list | selectattr('OU4', 'equalto', item.OU) | list | length > 0 
+         else (data_ous.list | selectattr('OU3', 'equalto', item.OU) | first 
+         if data_ous.list | selectattr('OU3', 'equalto', item.OU) | list | length > 0 
+         else (data_ous.list | selectattr('OU2', 'equalto', item.OU) | first 
+         if data_ous.list | selectattr('OU2', 'equalto', item.OU) | list | length > 0 
+         else (data_ous.list | selectattr('OU1', 'equalto', item.OU) | first))) %}
+      
+      {% set ldap_base = 'DC=' ~ found_ou.domain ~ ',DC=' ~ found_ou.ext %}
+      
+      OU={{ item.OU }}{% if found_ou.OU3 and item.OU != found_ou.OU3 %},OU={{ found_ou.OU3 }}{% endif %}{% if found_ou.OU2 and item.OU != found_ou.OU2 %},OU={{ found_ou.OU2 }}{% endif %}{% if found_ou.OU1 and item.OU != found_ou.OU1 %},OU={{ found_ou.OU1 }}{% endif %},{{ ldap_base }}
+    state: present
+    enabled: yes
+  loop: "{{ data_users_raw[1:] }}"

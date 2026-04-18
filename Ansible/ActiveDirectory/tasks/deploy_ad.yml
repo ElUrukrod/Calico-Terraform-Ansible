@@ -1,0 +1,41 @@
+---
+- name: Vérifier si le serveur est déjà un Contrôleur de Domaine
+  ansible.windows.win_powershell:
+    script: |
+      (Get-Service adws -ErrorAction SilentlyContinue).Status
+  register: ad_status
+
+- name: Installer les services AD DS
+  ansible.windows.win_feature:
+    name: AD-Domain-Services
+    state: present
+    include_management_tools: yes
+  when: ad_status.output[0] != "Running"
+
+- name: Promouvoir le serveur en Contrôleur de Domaine
+  microsoft.ad.domain:
+    dns_domain_name: "{{ domain_name }}"
+    safe_mode_password: "{{ ad_safe_mode_password }}"
+    domain_netbios_name: "{{ domain_netbios_name | default('CALICO') }}"
+  register: ad_install
+  when: ad_status.output[0] != "Running"
+
+- name: Redémarrage après installation
+  ansible.windows.win_reboot:
+    msg: "Promotion AD terminée, redémarrage en cours..."
+    reboot_timeout: 600
+  when: ad_install.changed
+
+- name: Vérifier si la corbeille AD est déjà activée
+  ansible.windows.win_powershell:
+    script: |
+      (Get-ADOptionalFeature -Filter 'Name -like "Recycle Bin Feature"').EnabledScopes
+  register: recycle_bin_check
+
+- name: Activer la corbeille AD
+  ansible.windows.win_powershell:
+    script: |
+      Enable-ADOptionalFeature 'Recycle Bin Feature' -Scope ForestOrConfigurationSet -Target "{{ domain_name }}" -Confirm:$false
+  when: 
+    - (ad_install.changed | default(false)) or (recycle_bin_check.output | length == 0)
+    - not ansible_check_mode

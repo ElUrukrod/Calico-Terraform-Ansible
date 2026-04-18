@@ -1,0 +1,33 @@
+---
+- name: Lecture du CSV des OU
+  community.general.read_csv:
+    path: "{{ csv_ous }}"
+    delimiter: ";"
+  register: data_ous
+  delegate_to: localhost
+  connection: local
+  vars:
+    ansible_connection: local
+    ansible_shell_type: sh
+    ansible_python_interpreter: /usr/bin/python3
+    ansible_user: "{{ lookup('env', 'USER') }}"
+    ansible_ssh_extra_args: ""
+
+- name: Créer l'arborescence des OU (Calcul dynamique total)
+  microsoft.ad.ou:
+    # On garde ta logique pour le nom (la dernière OU non vide)
+    name: >-
+      {{ item.OU4 if item.OU4 else (item.OU3 if item.OU3 else (item.OU2 if item.OU2 else item.OU1)) }}
+    
+    # On corrige le path pour utiliser 'domain' au lieu de 'domain1/domain2'
+    path: >-
+      {% set path_parts = [] %}
+      {% if item.OU4 and item.OU3 %}{% set _ = path_parts.append('OU=' ~ item.OU3) %}{% endif %}
+      {% if item.OU3 and item.OU2 %}{% set _ = path_parts.append('OU=' ~ item.OU2) %}{% endif %}
+      {% if item.OU2 and item.OU1 %}{% set _ = path_parts.append('OU=' ~ item.OU1) %}{% endif %}
+      
+      {% set ldap_base = 'DC=' ~ item.domain ~ ',DC=' ~ item.ext %}
+      
+      {{ path_parts | join(',') ~ ',' if path_parts | length > 0 else '' }}{{ ldap_base }}
+    state: present
+  loop: "{{ data_ous.list }}"

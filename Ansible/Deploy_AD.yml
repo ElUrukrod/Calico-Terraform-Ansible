@@ -1,0 +1,16 @@
+---
+- name: Installation du Contrôleur de Domaine
+  hosts: all
+  vars:
+    # --- CONFIGURATION PAR DÉFAUT (Windows) ---
+    ansible_user: Administrateur
+    ansible_connection: ssh
+    ansible_shell_type: powershell
+    
+    # --- TES VARIABLES ---
+    domain_name: "calico.priv"
+    csv_ous: "./ous.csv"
+    csv_users: "./users.csv"
+
+  roles:
+    - role: ActiveDirectory
